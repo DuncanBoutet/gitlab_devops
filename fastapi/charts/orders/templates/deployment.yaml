@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-orders-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-orders-service
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-orders-service
+    spec:
+      containers:
+        - name: orders-service
+          image: {{ .Values.ordersService.image.repository }}:{{ .Values.ordersService.image.tag }}
+          command:
+            - sh
+            - '-c'
+            - 'uvicorn main:app --reload --host 0.0.0.0'
+          envFrom:
+            - configMapRef:
+                name: orders-configmap
+          volumeMounts:
+            - name: odr-volume
+              mountPath: /app
+      volumes:
+        - name: odr-volume
+          persistentVolumeClaim:
+            claimName: odr-service-volume
+

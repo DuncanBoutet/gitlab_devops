@@ -1,0 +1,5 @@
+ordersService:
+  image:
+    repository: "boudun/k-orders"
+    tag: "latest"
+  host: "0.0.0.0"

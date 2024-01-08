@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-users-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-users-service
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-users-service
+    spec:
+      containers:
+        - name: users-service
+          image: {{ .Values.usersService.image.repository }}:{{ .Values.usersService.image.tag }}
+          command:
+            - sh
+            - '-c'
+            - 'uvicorn main:app --reload --host 0.0.0.0'
+          envFrom:
+            - configMapRef:
+                name: users-configmap
+          volumeMounts:
+            - name: usr-volume
+              mountPath: /app
+      volumes:
+        - name: usr-volume
+          persistentVolumeClaim:
+            claimName: usr-service-volume
+
