@@ -1,0 +1,190 @@
+variables:
+  KUBE_NAMESPACE_dev: dev
+  KUBE_NAMESPACE_qa: qa
+  KUBE_NAMESPACE_staging: staging
+  KUBE_NAMESPACE_prod: prod
+  IP_DEV: 54.170.14.5 #Remplacer par votre IP de la VM
+  IP_QA: 54.170.14.5 #Remplacer par votre IP de la VM
+  IP_STAGING: 54.170.14.5 #Remplacer par votre IP de la VM
+  IP_PROD: 54.170.14.5 #Remplacer par votre IP de la VM
+  NODEPORT_DEV: 30000
+  NODEPORT_QA: 30001
+  NODEPORT_STAGING: 30002
+  NODEPORT_PROD: 30003
+  DOCKER_ID: boudun
+  DOCKER_IMAGE_GATEWAY: k-api-gateway
+  DOCKER_IMAGE_USERS: k-users
+  DOCKER_IMAGE_ORDERS: k-orders
+  DOCKER_TAG: "v.${CI_PIPELINE_IID}.0"
+
+image:
+  name: "ubuntu:latest"
+  entrypoint: ["/bin/sh", "-c"]
+
+stages:
+  - test
+  - build_gateway
+  - build_users
+  - build_orders
+  - run
+  - push
+  - deploy_dev
+  - deploy_qa
+  - deploy_staging
+  - deploy_prod
+
+test:
+  stage: test
+  image: python:latest
+  script:
+    - echo "nothing here"
+
+build_gateway:
+  stage: build_gateway
+  script:
+    # Build the container image
+    - docker build -t $DOCKER_ID/$DOCKER_IMAGE_GATEWAY:$DOCKER_TAG -f ./gateway/Dockerfile ./gateway
+    # Tag the container image from latest to the commit ref
+    - docker tag "$DOCKER_ID/$DOCKER_IMAGE_GATEWAY:$DOCKER_TAG" "$DOCKER_ID/$DOCKER_IMAGE_GATEWAY:$CI_COMMIT_SHORT_SHA"
+build_users:
+  stage: build_users
+  script:
+    # Build the container image
+    - docker build -t $DOCKER_ID/$DOCKER_IMAGE_USERS:$DOCKER_TAG -f ./users/Dockerfile ./users
+    # Tag the container image from latest to the commit ref
+    - docker tag "$DOCKER_ID/$DOCKER_IMAGE_USERS:$DOCKER_TAG" "$DOCKER_ID/$DOCKER_IMAGE_USERS:$CI_COMMIT_SHORT_SHA"
+build_orders:
+  stage: build_orders
+  script:
+    # Build the container image
+    - docker build -t $DOCKER_ID/$DOCKER_IMAGE_ORDERS:$DOCKER_TAG -f ./orders/Dockerfile ./orders
+    # Tag the container image from latest to the commit ref
+    - docker tag "$DOCKER_ID/$DOCKER_IMAGE_ORDERS:$DOCKER_TAG" "$DOCKER_ID/$DOCKER_IMAGE_ORDERS:$CI_COMMIT_SHORT_SHA"
+
+run:
+  stage: run
+  script:
+    - echo "Lancement de orders"
+    - docker rm -f orders
+    - docker run -d --name orders --env-file ./orders/.env -v ./orders:/app $DOCKER_ID/$DOCKER_IMAGE_ORDERS:$DOCKER_TAG sh -c "uvicorn main:app --reload --host 0.0.0.0"
+    - echo "Lancement de users"
+    - docker rm -f users
+    - docker run -d --name users --env-file ./users/.env -v ./users:/app $DOCKER_ID/$DOCKER_IMAGE_USERS:$DOCKER_TAG sh -c "uvicorn main:app --reload --host 0.0.0.0"
+    - echo "Lancement de gateway"
+    - docker rm -f gateway
+    - docker run -d -p 8001:8000 --name gateway --env-file ./gateway/.env -v ./gateway:/app $DOCKER_ID/$DOCKER_IMAGE_GATEWAY:$DOCKER_TAG sh -c "uvicorn main:app --reload --host 0.0.0.0"
+    - sleep 10
+    - curl http://localhost:8001/docs
+    - docker stop gateway
+    - docker stop users
+    - docker stop orders
+    - docker rm gateway
+    - docker rm users
+    - docker rm orders
+
+push:
+  stage: push
+  before_script:
+    - docker info
+    # Login to the Gitlab Container registry
+    - docker login -u "$DOCKER_ID" -p "$DOCKERHUB_PASSW"
+  script:
+    # Push the container image
+    - docker push $DOCKER_ID/$DOCKER_IMAGE_GATEWAY:$DOCKER_TAG
+    - docker push $DOCKER_ID/$DOCKER_IMAGE_USERS:$DOCKER_TAG
+    - docker push $DOCKER_ID/$DOCKER_IMAGE_ORDERS:$DOCKER_TAG
+    # If we are building a tag, push the `latest` container image tag too
+    - if [ ! -z "$CI_COMMIT_TAG" ]; then docker push $DOCKER_IMAGE_GATEWAY:latest;docker push $DOCKER_IMAGE_USERS:latest;docker push $DOCKER_ID/$DOCKER_IMAGE_ORDERS:latest; fi
+
+.stop_generic: # block to be reused in CI jobs
+  when: manual
+  # Don't stop the "review" for master branch or tags,
+  # it is only for branches (so PRs (most of the time))
+  environment:
+    action: stop
+  script:
+    - sudo helm uninstall app -n $NAMESPACE --kubeconfig /etc/rancher/k3s/k3s.yaml
+
+.deploy_generic:
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - kubectl delete configmap gateway-configmap
+    - kubectl delete configmap orders-configmap
+    - kubectl delete configmap users-configmap
+    - kubectl create configmap gateway-configmap --from-env-file=./gateway/.env
+    - kubectl create configmap orders-configmap --from-env-file=./orders/.env
+    - kubectl create configmap users-configmap --from-env-file=./users/.env
+    - ls -al
+    - cp fastapi/values.yaml values.yml
+    - ls -al
+    - cd fastapi
+    - helm dependency build
+    - cd ..
+    - sudo helm upgrade --install app fastapi/ --values=values.yml --namespace $NAMESPACE  --kubeconfig /etc/rancher/k3s/k3s.yaml --set image.repository="$CI_REGISTRY_IMAGE" --set image.tag="$CI_COMMIT_SHORT_SHA" --set service.nodeport="$NODEPORT_DEV"
+
+
+stop_dev:
+  extends: .stop_generic
+  environment:
+    name: dev-$CI_COMMIT_REF_NAME
+  stage: deploy_dev
+  variables:
+    NAMESPACE: dev
+
+stop_qa:
+  extends: .stop_generic
+  environment:
+    name: qa-$CI_COMMIT_REF_NAME
+  stage: deploy_qa
+  variables:
+    NAMESPACE: qa
+
+stop_staging:
+  extends: .stop_generic
+  environment:
+    name: staging-$CI_COMMIT_REF_NAME
+  stage: deploy_staging
+  variables:
+    NAMESPACE: staging
+
+deploy_dev:
+  extends: .deploy_generic
+  environment:
+    name: dev-$CI_COMMIT_REF_NAME
+    url: http://$IP_DEV:$NODEPORT_DEV
+    on_stop: stop_dev
+  stage: deploy_dev
+  variables:
+    NAMESPACE: dev
+
+deploy_qa:
+  extends: .deploy_generic
+  environment:
+    name: qa-$CI_COMMIT_REF_NAME
+    url: http://$IP_QA:$NODEPORT_QA
+    on_stop: stop_qa
+  stage: deploy_qa
+  variables:
+    NAMESPACE: qa
+
+deploy_staging:
+  extends: .deploy_generic
+  environment:
+    name: staging-$CI_COMMIT_REF_NAME
+    url: http://$IP_STAGING:$NODEPORT_STAGING
+    on_stop: stop_staging
+  stage: deploy_staging
+  variables:
+    NAMESPACE: staging
+
+deploy_prod:
+  extends: .deploy_generic
+  when: manual
+  environment:
+    name: prod-$CI_COMMIT_REF_NAME
+    url: http://$IP_PROD:$NODEPORT_PROD
+  stage: deploy_prod
+  variables:
+    NAMESPACE: prod
